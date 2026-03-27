@@ -522,8 +522,11 @@ function showRemoteCursor(x,y) {
   remoteHideT=setTimeout(()=>remoteCursorEl.style.display='none',3000);
 }
 
-// WebRTC
-let roomId=null,isHost=false,pc=null,dc=null,bc=null,pending=[];
+// WebRTC + WebSocket signaling
+let roomId=null,isHost=false,pc=null,dc=null,socket=null,pending=[];
+
+const SIGNAL_SERVER =
+"wss://ws.ifelse.io";
 const STUN={iceServers:[{urls:'stun:stun.l.google.com:19302'},{urls:'stun:stun1.l.google.com:19302'}]};
 function genId(){return Math.random().toString(36).slice(2,8).toUpperCase();}
 function setStatus(txt,cls){const b=document.getElementById('connBadge');b.textContent=txt;b.className='conn-badge '+(cls||'');}
@@ -554,28 +557,182 @@ async function joinRoom() {
 }
 
 async function setupPeer(host) {
-  if(pc){try{pc.close();}catch(e){}}
-  pc=new RTCPeerConnection(STUN);
-  bc=new BroadcastChannel('draw-room-'+roomId);
-  pc.onicecandidate=e=>{if(e.candidate)bc.postMessage({type:'candidate',cand:e.candidate,from:host?'host':'guest'});};
-  pc.onconnectionstatechange=()=>{
-    const s=pc.connectionState;
-    if(s==='connected'){setStatus('connected','connected');setPartnerOnline(true);showToast('Connected! Draw together 🎨');}
-    else if(['disconnected','failed','closed'].includes(s)){setStatus('disconnected','');setPartnerOnline(false);}
-  };
-  bc.onmessage=async ev=>{
-    const m=ev.data;
-    if(host){
-      if(m.type==='request-offer'){const o=await pc.createOffer();await pc.setLocalDescription(o);bc.postMessage({type:'offer',sdp:o.sdp});}
-      else if(m.type==='answer'){if(pc.signalingState!=='have-local-offer')return;await pc.setRemoteDescription({type:'answer',sdp:m.sdp});pending.forEach(c=>pc.addIceCandidate(c));pending=[];}
-      else if(m.type==='candidate'&&m.from==='guest'){pc.remoteDescription?pc.addIceCandidate(m.cand):pending.push(m.cand);}
-    } else {
-      if(m.type==='offer'){await pc.setRemoteDescription({type:'offer',sdp:m.sdp});const a=await pc.createAnswer();await pc.setLocalDescription(a);bc.postMessage({type:'answer',sdp:a.sdp});pending.forEach(c=>pc.addIceCandidate(c));pending=[];}
-      else if(m.type==='candidate'&&m.from==='host'){pc.remoteDescription?pc.addIceCandidate(m.cand):pending.push(m.cand);}
+
+  if (pc) {
+    try { pc.close(); } catch(e){}
+  }
+
+  pc = new RTCPeerConnection(STUN);
+
+  socket = new WebSocket(SIGNAL_SERVER);
+
+  socket.onopen = () => {
+
+    socket.send(JSON.stringify({
+      type: "join",
+      room: roomId
+    }));
+
+    if (!host) {
+
+      socket.send(JSON.stringify({
+        type: "request-offer"
+      }));
+
     }
+
   };
-  if(host){dc=pc.createDataChannel('draw',{ordered:true});setupDC(dc);}
-  else{pc.ondatachannel=e=>{dc=e.channel;setupDC(dc);};setTimeout(()=>bc.postMessage({type:'request-offer'}),400);}
+
+  socket.onmessage = async (event) => {
+
+    const m = JSON.parse(event.data);
+
+    if (host) {
+
+      if (m.type === "request-offer") {
+
+        const offer =
+          await pc.createOffer();
+
+        await pc.setLocalDescription(offer);
+
+        socket.send(JSON.stringify({
+          type: "offer",
+          sdp: offer.sdp
+        }));
+
+      }
+
+      else if (m.type === "answer") {
+
+        await pc.setRemoteDescription({
+          type: "answer",
+          sdp: m.sdp
+        });
+
+        pending.forEach(c =>
+          pc.addIceCandidate(c)
+        );
+
+        pending = [];
+
+      }
+
+      else if (m.type === "candidate") {
+
+        if (pc.remoteDescription) {
+
+          pc.addIceCandidate(m.candidate);
+
+        } else {
+
+          pending.push(m.candidate);
+
+        }
+
+      }
+
+    }
+
+    else {
+
+      if (m.type === "offer") {
+
+        await pc.setRemoteDescription({
+          type: "offer",
+          sdp: m.sdp
+        });
+
+        const answer =
+          await pc.createAnswer();
+
+        await pc.setLocalDescription(answer);
+
+        socket.send(JSON.stringify({
+          type: "answer",
+          sdp: answer.sdp
+        }));
+
+      }
+
+      else if (m.type === "candidate") {
+
+        if (pc.remoteDescription) {
+
+          pc.addIceCandidate(m.candidate);
+
+        } else {
+
+          pending.push(m.candidate);
+
+        }
+
+      }
+
+    }
+
+  };
+
+  pc.onicecandidate = (event) => {
+
+    if (event.candidate) {
+
+      socket.send(JSON.stringify({
+        type: "candidate",
+        candidate: event.candidate
+      }));
+
+    }
+
+  };
+
+  pc.onconnectionstatechange = () => {
+
+    const s = pc.connectionState;
+
+    if (s === "connected") {
+
+      setStatus("connected","connected");
+      setPartnerOnline(true);
+
+      showToast(
+        "Connected! Draw together 🎨"
+      );
+
+    }
+
+    else if (
+      ["disconnected","failed","closed"]
+      .includes(s)
+    ) {
+
+      setStatus("disconnected","");
+      setPartnerOnline(false);
+
+    }
+
+  };
+
+  if (host) {
+
+    dc = pc.createDataChannel("draw");
+
+    setupDC(dc);
+
+  }
+
+  else {
+
+    pc.ondatachannel = (e) => {
+
+      dc = e.channel;
+
+      setupDC(dc);
+
+    };
+
+  }
+
 }
 
 function setupDC(ch){
